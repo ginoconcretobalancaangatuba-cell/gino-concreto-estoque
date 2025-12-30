@@ -11,20 +11,23 @@ export interface ScaleReportExtraction {
 
 function cleanJsonResponse(text: string): string {
   let cleaned = text.trim();
-  if (cleaned.startsWith("```")) {
-    cleaned = cleaned.replace(/^```json/i, "").replace(/```$/i, "").trim();
-  }
+  // Remove possible markdown code block wrappers
+  cleaned = cleaned.replace(/^```json\n?/i, "").replace(/\n?```$/i, "").trim();
   return cleaned;
 }
 
 export async function parseScaleReport(mimeType: string, base64Data: string): Promise<ScaleReportExtraction> {
-  // Always use a named parameter for the apiKey when initializing GoogleGenAI.
-  // We create a new instance right before making an API call to ensure we use the current API_KEY.
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY! });
+  const apiKey = process.env.API_KEY;
+  
+  if (!apiKey || apiKey === 'undefined' || apiKey === '') {
+    throw new Error("CHAVE_AUSENTE: A chave da API não foi detectada. Por favor, use o botão 'CONFIGURAR ACESSO' para selecionar sua chave do projeto Google Cloud (com faturamento ativo).");
+  }
+
+  // Create instance right before use with the current key
+  const ai = new GoogleGenAI({ apiKey });
 
   try {
     const response = await ai.models.generateContent({
-      // For simple text extraction tasks, gemini-3-flash-preview is the recommended model.
       model: "gemini-3-flash-preview",
       contents: {
         parts: [
@@ -35,27 +38,29 @@ export async function parseScaleReport(mimeType: string, base64Data: string): Pr
             },
           },
           {
-            text: `Aja como um leitor de tickets de pesagem de concreto.
-            Extraia o PESO REAL/LÍQUIDO (Kg) carregado.
+            text: `Aja como um especialista em tickets de pesagem de concreto.
+            Analise a imagem/PDF e extraia os valores de PESO LÍQUIDO (Kg) carregado.
             
-            MAPEAMENTO:
-            - 'brita0': Brita 0, B0, Pedrisco.
-            - 'brita1': Brita 1, B1.
-            - 'areiaMedia': Areia Média, Rio, Lavada.
-            - 'areiaBrita': Areia de Brita, Pó de Pedra, Areia Industrial.
+            REGRAS:
+            1. Busque o peso efetivamente carregado (REAL, LÍQUIDO ou CARREGADO).
+            2. Se o ticket estiver em Toneladas (T), multiplique por 1000 para converter para Kg.
+            3. Ignore o peso "Alvo" (Target).
+            4. Se não encontrar o material, retorne 0.
+
+            MAPEAMENTO JSON:
+            - 'brita0': Brita 0, B0, Pedrisco ou similar.
+            - 'brita1': Brita 1, B1 ou similar.
+            - 'areiaMedia': Areia Média, Rio, Lavada ou Natural.
+            - 'areiaBrita': Areia de Brita, Pó de Pedra ou Areia Industrial.
             - 'areiaFina': Areia Fina.
 
-            REGRAS:
-            - Se o ticket estiver em Toneladas (ex: 5.40), converta para Kg (5400).
-            - Ignore Alvos/Target. Use apenas o REAL CARREGADO.
-            - Retorne apenas JSON puro.`,
+            IMPORTANTE: Retorne APENAS o objeto JSON.`,
           },
         ],
       },
       config: {
         responseMimeType: "application/json",
-        // Setting responseSchema to ensure structured output.
-        // We omit thinkingConfig here to prioritize speed and tokens for this simple task.
+        thinkingConfig: { thinkingBudget: 4096 },
         responseSchema: {
           type: Type.OBJECT,
           properties: {
@@ -70,11 +75,22 @@ export async function parseScaleReport(mimeType: string, base64Data: string): Pr
       },
     });
 
-    // The .text property directly returns the generated string.
     const rawText = response.text || '{"brita0":0,"brita1":0,"areiaMedia":0,"areiaBrita":0,"areiaFina":0}';
-    return JSON.parse(cleanJsonResponse(rawText)) as ScaleReportExtraction;
+    const cleanedText = cleanJsonResponse(rawText);
+    
+    try {
+      return JSON.parse(cleanedText) as ScaleReportExtraction;
+    } catch (parseError) {
+      console.error("JSON inválido retornado pela IA:", cleanedText);
+      throw new Error("FORMATO_INVALIDO: Não foi possível processar a resposta da balança.");
+    }
   } catch (e: any) {
     console.error("Erro Gemini:", e);
+    
+    if (e.message?.includes("Requested entity was not found")) {
+      throw new Error("CHAVE_INVALIDA: A chave API selecionada não é válida para este modelo. Certifique-se de usar um projeto pago.");
+    }
+    
     throw e;
   }
 }

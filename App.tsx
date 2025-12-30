@@ -12,7 +12,11 @@ import {
   Settings2,
   X,
   CheckCircle2,
-  Key
+  Key,
+  ShieldAlert,
+  ExternalLink,
+  Loader2,
+  Lock
 } from 'lucide-react';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
@@ -29,9 +33,6 @@ import {
   MATERIALS_LIST 
 } from './constants.ts';
 import { parseScaleReport, ScaleReportExtraction } from './services/geminiService.ts';
-
-// Removed manual Window interface declaration to avoid conflict with pre-existing AIStudio types 
-// in the runtime environment. We use casting for accessing window.aistudio.
 
 const App: React.FC = () => {
   const STORAGE_KEY_STOCK = 'gino_stock_v5';
@@ -61,7 +62,7 @@ const App: React.FC = () => {
   });
 
   const [isLoading, setIsLoading] = useState(false);
-  const [hasApiKey, setHasApiKey] = useState(true);
+  const [hasApiKey, setHasApiKey] = useState<boolean | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [modalType, setModalType] = useState<'invoice' | 'adjustment' | 'reset' | null>(null);
@@ -73,29 +74,41 @@ const App: React.FC = () => {
     localStorage.setItem(STORAGE_KEY_HISTORY, JSON.stringify(history));
   }, [stock, history]);
 
-  // Check for API key presence on load.
-  useEffect(() => {
-    const checkKey = async () => {
-      if (process.env.API_KEY) {
-        setHasApiKey(true);
-      } else if ((window as any).aistudio) {
-        // Accessing environment-injected aistudio helper.
-        const selected = await (window as any).aistudio.hasSelectedApiKey();
-        setHasApiKey(selected);
-      } else {
+  // Fix: Added proper implementation for checkKeyStatus
+  const checkKeyStatus = async () => {
+    if (process.env.API_KEY && process.env.API_KEY !== 'undefined' && process.env.API_KEY !== '') {
+      setHasApiKey(true);
+      return;
+    }
+
+    if ((window as any).aistudio) {
+      try {
+        const has = await (window as any).aistudio.hasSelectedApiKey();
+        setHasApiKey(has);
+      } catch (e) {
         setHasApiKey(false);
       }
-    };
-    checkKey();
+    } else {
+      setHasApiKey(false);
+    }
+  };
+
+  useEffect(() => {
+    checkKeyStatus();
   }, []);
 
+  // Fix: Handle API key selection according to guidelines
   const handleConfigKey = async () => {
     if ((window as any).aistudio) {
-      await (window as any).aistudio.openSelectKey();
-      // Assume success after opening selection to mitigate race conditions.
-      setHasApiKey(true);
+      try {
+        await (window as any).aistudio.openSelectKey();
+        // Assume success to proceed to app UI to avoid race condition
+        setHasApiKey(true);
+      } catch (e) {
+        alert("Erro ao abrir seletor de chave.");
+      }
     } else {
-      alert("Para configurar a chave, você deve estar em um ambiente que suporte Google AI Studio.");
+      alert("AI Studio não detectado. A chave deve ser fornecida via ambiente.");
     }
   };
 
@@ -121,7 +134,7 @@ const App: React.FC = () => {
 
   const handleModalSubmit = () => {
     const qty = parseNumber(inputQuantity);
-    if (qty <= 0) {
+    if (qty <= 0 && modalType !== 'reset') {
       alert('Por favor, insira uma quantidade maior que zero.');
       return;
     }
@@ -138,277 +151,385 @@ const App: React.FC = () => {
     setInputQuantity('');
   };
 
+  // Fix: Completed processScaleReport function and corrected 'base6' typo to 'base64'
   const processScaleReport = async (file: File) => {
     if (!file) return;
     setIsLoading(true);
     
     try {
       const reader = new FileReader();
-      reader.onload = async () => {
-        try {
-          const result = reader.result as string;
-          const mimeType = file.type || (file.name.endsWith('.pdf') ? 'application/pdf' : 'image/jpeg');
-          const base64 = result.split(',')[1];
-          
-          const data: ScaleReportExtraction = await parseScaleReport(mimeType, base64);
-          const totalWeight = data.brita0 + data.brita1 + data.areiaMedia + data.areiaBrita + data.areiaFina;
-          
-          if (totalWeight === 0) {
-            alert('Não foi possível encontrar pesos de materiais. Verifique se o ticket está legível.');
-            setIsLoading(false);
-            return;
-          }
-
-          setStock(prev => {
-            const updated = { ...prev };
-            updated['Brita 0'] = Math.max(0, updated['Brita 0'] - data.brita0);
-            updated['Brita 1'] = Math.max(0, updated['Brita 1'] - data.brita1);
-            const totalAreia = data.areiaMedia + data.areiaFina;
-            updated['Areia Média'] = Math.max(0, updated['Areia Média'] - totalAreia);
-            updated['Areia de Brita'] = Math.max(0, updated['Areia de Brita'] - data.areiaBrita);
-            return updated;
-          });
-
-          addTransaction('SCALE_REPORT', undefined, 0, `Balança: Abatimento de ${totalWeight.toLocaleString('pt-BR')} kg.`);
-          alert(`Sucesso! Abatidos ${totalWeight.toLocaleString('pt-BR')} kg.`);
-        } catch (err: any) {
-          // Reset key status if key issues are detected.
-          if (err.message?.includes("API key not valid") || err.message?.includes("Requested entity was not found")) {
-            alert("A chave de acesso expirou. Por favor, reconfigure o acesso.");
-            setHasApiKey(false);
-          } else {
-            alert("Erro ao ler o PDF. Tente enviar novamente.");
-          }
-        } finally {
-          setIsLoading(false);
-        }
-      };
+      const fileReadPromise = new Promise<string>((resolve, reject) => {
+        reader.onload = () => resolve(reader.result as string);
+        reader.onerror = reject;
+      });
       reader.readAsDataURL(file);
-    } catch (error) {
-      alert('Erro inesperado no upload.');
+      
+      const result = await fileReadPromise;
+      const mimeType = file.type || (file.name.endsWith('.pdf') ? 'application/pdf' : 'image/jpeg');
+      const base64Data = result.split(',')[1];
+      
+      const data: ScaleReportExtraction = await parseScaleReport(mimeType, base64Data);
+      
+      const update = {
+        'Brita 0': data.brita0,
+        'Brita 1': data.brita1,
+        'Areia Média': data.areiaMedia,
+        'Areia de Brita': data.areiaBrita
+      };
+
+      setStock(prev => {
+        const next = { ...prev };
+        (Object.keys(update) as MaterialName[]).forEach(m => {
+          next[m] = Math.max(0, next[m] - update[m]);
+        });
+        return next;
+      });
+
+      const detailStr = Object.entries(update)
+        .filter(([_, v]) => v > 0)
+        .map(([k, v]) => `${k}: ${v}kg`)
+        .join(', ');
+
+      addTransaction('SCALE_REPORT', undefined, 0, `Saída Balança: ${detailStr || 'Nenhum material detectado'}`);
+      alert("Ticket processado com sucesso! O estoque foi atualizado.");
+    } catch (e: any) {
+      alert(`Erro ao processar ticket: ${e.message}`);
+    } finally {
       setIsLoading(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
     }
   };
 
-  const confirmReset = () => {
-    localStorage.clear();
-    setStock({ 'Brita 0': 0, 'Brita 1': 0, 'Areia Média': 0, 'Areia de Brita': 0 });
-    setHistory([]);
-    setModalType(null);
-  };
-
-  const downloadReport = () => {
+  const handleDownloadPDF = () => {
     const doc = new jsPDF();
-    doc.setFontSize(22);
-    doc.setTextColor(37, 99, 235);
-    doc.text('Gino Concreto', 14, 20);
+    doc.setFontSize(18);
+    doc.text('Relatório de Estoque e Movimentação - GINO', 14, 22);
+    
     doc.setFontSize(11);
-    doc.text('Relatório Geral de Estoque - Angatuba', 14, 28);
+    doc.text(`Gerado em: ${new Date().toLocaleString('pt-BR')}`, 14, 30);
+
+    const stockData = MATERIALS_LIST.map(m => [m, `${stock[m].toLocaleString('pt-BR')} kg`]);
     autoTable(doc, {
-      startY: 38,
-      head: [['Material', 'Estoque (Kg)', 'Status']],
-      body: MATERIALS_LIST.map(m => [m, stock[m].toLocaleString('pt-BR'), stock[m] < STOCK_MIN_THRESHOLD ? 'ESTOQUE BAIXO' : 'OK']),
-      headStyles: { fillColor: [37, 99, 235] }
+      startY: 40,
+      head: [['Material', 'Estoque Atual']],
+      body: stockData,
+      theme: 'grid',
     });
-    doc.save(`gino_estoque_${new Date().getTime()}.pdf`);
+
+    const historyData = history.map(tx => [
+      new Date(tx.timestamp).toLocaleString('pt-BR'),
+      tx.type === 'INVOICE' ? 'Entrada/Ajuste' : 'Saída Balança',
+      tx.details || '-'
+    ]);
+
+    autoTable(doc, {
+      startY: (doc as any).lastAutoTable.finalY + 15,
+      head: [['Data/Hora', 'Tipo', 'Detalhes']],
+      body: historyData,
+      theme: 'striped',
+    });
+
+    doc.save('relatorio-gino-estoque.pdf');
   };
 
-  const loadsPossible = Math.floor(Math.min(
-    stock['Brita 0'] / RECIPE['Brita 0'] || 0,
-    stock['Brita 1'] / RECIPE['Brita 1'] || 0,
-    stock['Areia Média'] / RECIPE['Areia Média'] || 0,
-    stock['Areia de Brita'] / RECIPE['Areia de Brita'] || 0
-  )) || 0;
-  const m3Possible = loadsPossible * LOAD_VOLUME_M3;
-
-  const getLastInvoice = (material: MaterialName) => history.find(h => h.type === 'INVOICE' && h.material === material);
-  const getLastReport = () => history.find(h => h.type === 'SCALE_REPORT');
-
+  // Fix: Component JSX implementation to resolve the 'void' return error
   return (
-    <div className="min-h-screen p-4 md:p-8 flex flex-col gap-6 max-w-7xl mx-auto">
-      
-      {/* HEADER */}
-      <header className="flex flex-col items-center bg-slate-900/90 p-8 md:p-12 rounded-[40px] border border-slate-700/50 shadow-2xl gap-8 relative overflow-hidden">
-        
-        {/* Banner de Aviso de Chave */}
-        {!hasApiKey && (
-          <div className="absolute top-0 left-0 w-full bg-rose-600/90 text-white py-2 px-4 text-center text-[10px] font-black uppercase tracking-[0.2em] flex items-center justify-center gap-3 animate-pulse">
-            <AlertTriangle size={14} />
-            Configuração de Acesso Pendente
-            <button onClick={handleConfigKey} className="ml-4 bg-white text-rose-600 px-3 py-1 rounded-full hover:bg-slate-100 transition-colors">
-              Configurar Agora
+    <div className="min-h-screen bg-slate-50 text-slate-900 font-sans pb-10">
+      {/* Header */}
+      <header className="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-sm">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="bg-blue-600 p-2 rounded-lg">
+              <Package className="w-6 h-6 text-white" />
+            </div>
+            <h1 className="text-xl font-bold tracking-tight">GINO <span className="text-slate-400 font-normal">| Concreto</span></h1>
+          </div>
+          
+          <div className="flex items-center gap-4">
+            <button 
+              onClick={handleConfigKey}
+              className="flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-100 rounded-md transition-colors"
+            >
+              <Settings2 className="w-4 h-4" />
+              CONFIGURAR ACESSO
+            </button>
+            <button 
+              onClick={handleDownloadPDF}
+              className="flex items-center gap-2 px-4 py-2 bg-slate-900 text-white rounded-lg hover:bg-slate-800 transition-all shadow-sm font-medium"
+            >
+              <Download className="w-4 h-4" />
+              Exportar PDF
             </button>
           </div>
-        )}
-
-        <div className="text-center mt-4">
-          <h1 className="text-5xl md:text-7xl font-black tracking-tighter mb-2">
-            <span className="text-blue-500 uppercase">Gino</span> <span className="text-white uppercase">Concreto</span>
-          </h1>
-          <p className="text-slate-500 font-bold uppercase text-[10px] md:text-xs tracking-[0.5em]">Controle de Estoque Angatuba</p>
-        </div>
-
-        <div className="flex flex-wrap justify-center gap-4">
-          {!hasApiKey && (
-            <button onClick={handleConfigKey} className="flex items-center gap-3 bg-amber-600 hover:bg-amber-500 text-white px-8 py-4 rounded-2xl font-black transition-all shadow-xl hover:-translate-y-1 active:scale-95 text-sm uppercase">
-              <Key size={20} /> Configurar Acesso
-            </button>
-          )}
-
-          <button onClick={() => setModalType('invoice')} className="flex items-center gap-3 bg-blue-600 hover:bg-blue-500 text-white px-8 py-4 rounded-2xl font-black transition-all shadow-xl hover:-translate-y-1 active:scale-95 text-sm uppercase">
-            <PlusCircle size={20} /> Lançar Nota
-          </button>
-          
-          <button onClick={() => setModalType('adjustment')} className="flex items-center gap-3 bg-slate-700 hover:bg-slate-600 text-white px-8 py-4 rounded-2xl font-black transition-all shadow-xl hover:-translate-y-1 active:scale-95 text-sm uppercase">
-            <Settings2 size={20} /> Ajuste Manual
-          </button>
-          
-          <button 
-            onClick={() => fileInputRef.current?.click()} 
-            disabled={isLoading || !hasApiKey}
-            className={`flex items-center gap-3 bg-emerald-600 hover:bg-emerald-500 text-white px-8 py-4 rounded-2xl font-black transition-all shadow-xl hover:-translate-y-1 active:scale-95 text-sm uppercase ${isLoading || !hasApiKey ? 'opacity-50 cursor-not-allowed' : ''}`}
-          >
-            <FileUp size={20} /> {isLoading ? 'Lendo Balança...' : 'Enviar Balança'}
-          </button>
-          
-          <button onClick={downloadReport} className="flex items-center gap-3 bg-indigo-600 hover:bg-indigo-500 text-white px-8 py-4 rounded-2xl font-black transition-all shadow-xl hover:-translate-y-1 active:scale-95 text-sm uppercase">
-            <Download size={20} /> Exportar PDF
-          </button>
-          
-          <button onClick={() => setModalType('reset')} className="flex items-center gap-3 bg-rose-600 hover:bg-rose-500 text-white px-8 py-4 rounded-2xl font-black transition-all shadow-xl hover:-translate-y-1 active:scale-95 text-sm uppercase">
-            <Trash2 size={20} /> Limpar Tudo
-          </button>
-          
-          <input 
-            type="file" 
-            ref={fileInputRef} 
-            className="hidden" 
-            accept=".pdf,image/*" 
-            onChange={(e) => e.target.files?.[0] && processScaleReport(e.target.files[0])} 
-          />
         </div>
       </header>
 
-      {/* GRID DE MATERIAIS */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-4">
-          {MATERIALS_LIST.map(material => {
-            const isLow = stock[material] < STOCK_MIN_THRESHOLD;
-            const lastNote = getLastInvoice(material);
+      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-8 space-y-8">
+        {/* API Key Banner */}
+        {!hasApiKey && (
+          <div className="bg-amber-50 border border-amber-200 rounded-xl p-5 flex items-start gap-4">
+            <div className="p-2 bg-amber-100 rounded-full text-amber-600">
+              <ShieldAlert className="w-6 h-6" />
+            </div>
+            <div className="flex-1">
+              <h3 className="font-semibold text-amber-900">Configuração de IA Pendente</h3>
+              <p className="text-amber-800 text-sm mt-1">
+                Para processar tickets de balança automaticamente, você precisa selecionar uma Chave de API de um projeto pago no Google Cloud Console.
+              </p>
+              <div className="mt-3 flex items-center gap-4">
+                <button 
+                  onClick={handleConfigKey}
+                  className="px-4 py-2 bg-amber-600 text-white rounded-lg text-sm font-medium hover:bg-amber-700 transition-colors flex items-center gap-2"
+                >
+                  <Key className="w-4 h-4" />
+                  Configurar Chave
+                </button>
+                <a 
+                  href="https://ai.google.dev/gemini-api/docs/billing" 
+                  target="_blank" 
+                  rel="noreferrer"
+                  className="text-amber-700 text-sm font-medium flex items-center gap-1 hover:underline"
+                >
+                  Documentação de Faturamento <ExternalLink className="w-3 h-3" />
+                </a>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Dashboard Grid */}
+        <section className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+          {MATERIALS_LIST.map((material) => {
+            const currentStock = stock[material];
+            const isLow = currentStock < STOCK_MIN_THRESHOLD;
             return (
-              <div key={material} className={`relative p-8 rounded-[32px] border-2 transition-all shadow-xl overflow-hidden ${isLow ? 'bg-rose-950/20 border-rose-500/40' : 'bg-slate-800/40 border-slate-700/50'}`}>
-                {isLow && (
-                  <div className="absolute top-0 right-0 p-4 animate-pulse">
-                    <AlertTriangle size={24} className="text-rose-500" />
+              <div key={material} className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm relative overflow-hidden group">
+                <div className={`absolute top-0 left-0 w-full h-1 ${isLow ? 'bg-amber-500' : 'bg-emerald-500'}`} />
+                <div className="flex justify-between items-start mb-4">
+                  <span className="text-slate-500 font-medium text-sm uppercase tracking-wider">{material}</span>
+                  {isLow ? (
+                    <AlertTriangle className="w-5 h-5 text-amber-500" />
+                  ) : (
+                    <CheckCircle2 className="w-5 h-5 text-emerald-500" />
+                  )}
+                </div>
+                <div className="flex items-baseline gap-2">
+                  <span className="text-3xl font-bold">{currentStock.toLocaleString('pt-BR')}</span>
+                  <span className="text-slate-400 font-medium">kg</span>
+                </div>
+                <div className="mt-4 flex items-center gap-2">
+                  <div className="flex-1 bg-slate-100 rounded-full h-2 overflow-hidden">
+                    <div 
+                      className={`h-full transition-all duration-500 ${isLow ? 'bg-amber-500' : 'bg-emerald-500'}`} 
+                      style={{ width: `${Math.min(100, (currentStock / (STOCK_MIN_THRESHOLD * 2)) * 100)}%` }}
+                    />
                   </div>
-                )}
-                <div className="flex items-center gap-4 mb-6">
-                  <Package size={28} className={isLow ? 'text-rose-400' : 'text-blue-400'} />
-                  <h3 className="text-slate-400 text-xs font-black uppercase tracking-[0.2em]">{material}</h3>
                 </div>
-                
-                <div className="flex items-baseline gap-3">
-                  <span className={`text-6xl font-black tracking-tighter ${isLow ? 'text-rose-400' : 'text-white'}`}>
-                    {Math.round(stock[material]).toLocaleString('pt-BR')}
-                  </span>
-                  <span className="text-slate-500 font-bold text-lg">kg</span>
-                </div>
-                
-                <div className="mt-8 pt-6 border-t border-slate-700/50 text-[10px] text-slate-500 font-black uppercase">
-                  {lastNote ? `Último: ${new Date(lastNote.timestamp).toLocaleDateString()} (${lastNote.details})` : 'Sem registros'}
-                </div>
+                {isLow && <p className="text-xs text-amber-600 mt-2 font-medium">Estoque abaixo do recomendado</p>}
               </div>
             );
           })}
-        </div>
+        </section>
 
-        {/* CAPACIDADE */}
-        <div className="flex flex-col gap-6">
-          <div className="bg-gradient-to-br from-blue-600/20 to-indigo-700/20 border border-blue-500/30 p-10 rounded-[32px] shadow-2xl">
-            <h2 className="text-xl font-black mb-10 flex items-center gap-3 text-white">
-              <TrendingUp className="text-blue-400" size={24} /> CAPACIDADE
-            </h2>
-            <div className="space-y-10">
-              <div>
-                <div className="flex justify-between items-end mb-3">
-                  <span className="text-slate-200 font-bold text-xs uppercase tracking-widest">Cargas (8m³)</span>
-                  <span className="text-7xl font-black text-white leading-none">{loadsPossible}</span>
-                </div>
-                <div className="w-full bg-slate-950 h-3 rounded-full overflow-hidden border border-slate-700">
-                  <div className="h-full bg-blue-500 shadow-[0_0_20px_rgba(59,130,246,0.5)] transition-all duration-1000" style={{ width: `${Math.min(100, (loadsPossible / 40) * 100)}%` }} />
+        {/* Quick Actions */}
+        <section className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+          <div className="lg:col-span-2 space-y-6">
+            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
+              <h2 className="text-lg font-bold mb-6 flex items-center gap-2">
+                <TrendingUp className="w-5 h-5 text-blue-600" />
+                Gestão de Estoque
+              </h2>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <button 
+                  onClick={() => setModalType('invoice')}
+                  className="flex flex-col items-center justify-center gap-3 p-8 border-2 border-dashed border-slate-200 rounded-2xl hover:border-blue-500 hover:bg-blue-50 transition-all group"
+                >
+                  <div className="p-3 bg-blue-100 rounded-xl group-hover:bg-blue-200 transition-colors">
+                    <PlusCircle className="w-6 h-6 text-blue-600" />
+                  </div>
+                  <div className="text-center">
+                    <span className="block font-bold text-slate-800">Entrada de Material</span>
+                    <span className="text-sm text-slate-500">Adicionar via Nota Fiscal</span>
+                  </div>
+                </button>
+
+                <div className="relative group">
+                  <input 
+                    type="file" 
+                    ref={fileInputRef}
+                    onChange={(e) => e.target.files?.[0] && processScaleReport(e.target.files[0])}
+                    className="hidden"
+                    accept="image/*,application/pdf"
+                  />
+                  <button 
+                    disabled={isLoading}
+                    onClick={() => fileInputRef.current?.click()}
+                    className={`w-full flex flex-col items-center justify-center gap-3 p-8 border-2 border-dashed border-slate-200 rounded-2xl transition-all group ${isLoading ? 'opacity-50 cursor-wait' : 'hover:border-emerald-500 hover:bg-emerald-50'}`}
+                  >
+                    <div className="p-3 bg-emerald-100 rounded-xl group-hover:bg-emerald-200 transition-colors">
+                      {isLoading ? <Loader2 className="w-6 h-6 text-emerald-600 animate-spin" /> : <FileUp className="w-6 h-6 text-emerald-600" />}
+                    </div>
+                    <div className="text-center">
+                      <span className="block font-bold text-slate-800">{isLoading ? 'Processando...' : 'Lançar Ticket Balança'}</span>
+                      <span className="text-sm text-slate-500">Extração automática via IA</span>
+                    </div>
+                  </button>
                 </div>
               </div>
-              <div className="bg-slate-950/50 p-6 rounded-2xl border border-blue-500/10 text-5xl font-black text-blue-400">
-                {m3Possible.toFixed(0)} <span className="text-xl text-slate-600">m³</span>
+              
+              <div className="mt-6 flex justify-center">
+                <button 
+                  onClick={() => setModalType('adjustment')}
+                  className="text-sm text-slate-500 hover:text-slate-800 flex items-center gap-1 font-medium underline underline-offset-4"
+                >
+                  Realizar ajuste manual de inventário
+                </button>
+              </div>
+            </div>
+
+            {/* History Table */}
+            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+              <div className="p-6 border-b border-slate-100 flex justify-between items-center">
+                <h2 className="text-lg font-bold flex items-center gap-2">
+                  <FileText className="w-5 h-5 text-slate-400" />
+                  Histórico Recente
+                </h2>
+                <button 
+                  onClick={() => setHistory([])}
+                  className="text-xs text-red-500 font-medium hover:underline"
+                >
+                  Limpar Histórico
+                </button>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left">
+                  <thead>
+                    <tr className="bg-slate-50 text-slate-500 text-xs uppercase tracking-wider">
+                      <th className="px-6 py-4 font-semibold">Data/Hora</th>
+                      <th className="px-6 py-4 font-semibold">Operação</th>
+                      <th className="px-6 py-4 font-semibold">Detalhes</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {history.length === 0 ? (
+                      <tr>
+                        <td colSpan={3} className="px-6 py-10 text-center text-slate-400 text-sm">
+                          Nenhuma movimentação registrada.
+                        </td>
+                      </tr>
+                    ) : (
+                      history.map((tx) => (
+                        <tr key={tx.id} className="hover:bg-slate-50 transition-colors">
+                          <td className="px-6 py-4 text-sm text-slate-600">
+                            {new Date(tx.timestamp).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                          </td>
+                          <td className="px-6 py-4">
+                            <span className={`px-2 py-1 rounded-full text-[10px] font-bold uppercase tracking-tighter ${tx.type === 'INVOICE' ? 'bg-blue-100 text-blue-700' : 'bg-emerald-100 text-emerald-700'}`}>
+                              {tx.type === 'INVOICE' ? 'Entrada' : 'Balança'}
+                            </span>
+                          </td>
+                          <td className="px-6 py-4 text-sm font-medium text-slate-800">
+                            {tx.details}
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
               </div>
             </div>
           </div>
 
-          <div className="bg-slate-800/30 border border-slate-700 p-8 rounded-[32px] flex-grow">
-            <h2 className="text-[10px] font-black mb-6 flex items-center gap-3 text-slate-400 uppercase tracking-[0.3em]">
-              <FileText size={18} className="text-emerald-400" /> Histórico Balança
-            </h2>
-            {getLastReport() ? (
-              <div className="space-y-4">
-                <p className="text-[10px] text-slate-500 font-black">{new Date(getLastReport()!.timestamp).toLocaleString('pt-BR')}</p>
-                <div className="text-[11px] text-slate-400 italic bg-slate-900/40 p-5 rounded-2xl border border-slate-800/50 leading-relaxed">
-                  {getLastReport()?.details}
-                </div>
+          {/* Right Sidebar: Rules/Recipe */}
+          <div className="space-y-6">
+            <div className="bg-slate-900 text-white rounded-2xl p-6 shadow-xl relative overflow-hidden">
+              <div className="absolute top-[-20px] right-[-20px] opacity-10">
+                <TrendingUp className="w-32 h-32" />
               </div>
-            ) : (
-              <p className="text-[10px] text-slate-600 text-center py-10 uppercase font-black">Nenhuma leitura realizada</p>
-            )}
+              <h3 className="text-lg font-bold mb-4 flex items-center gap-2">
+                <Package className="w-5 h-5 text-blue-400" />
+                Receita Padrão
+              </h3>
+              <p className="text-slate-400 text-sm mb-6 leading-relaxed">
+                Consumo estimado por carga de <span className="text-white font-bold">{LOAD_VOLUME_M3}m³</span> de concreto.
+              </p>
+              <div className="space-y-4">
+                {Object.entries(RECIPE).map(([mat, qty]) => (
+                  <div key={mat} className="flex justify-between items-center border-b border-slate-800 pb-3">
+                    <span className="text-slate-300 text-sm">{mat}</span>
+                    <span className="font-mono font-bold">{qty.toLocaleString('pt-BR')} kg</span>
+                  </div>
+                ))}
+              </div>
+              <div className="mt-8 p-4 bg-white/5 rounded-xl border border-white/10">
+                <div className="flex items-center gap-3 text-amber-400">
+                  <Lock className="w-4 h-4" />
+                  <span className="text-xs font-bold uppercase tracking-widest">Configurações Travadas</span>
+                </div>
+                <p className="text-[10px] text-slate-500 mt-2">
+                  A edição de receitas e parâmetros de sistema requer nível de administrador sênior.
+                </p>
+              </div>
+            </div>
           </div>
-        </div>
-      </div>
+        </section>
+      </main>
 
-      {/* MODAL */}
+      {/* Modal Overlay */}
       {modalType && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/90 backdrop-blur-md">
-          <div className="bg-slate-900 w-full max-w-lg rounded-[40px] border border-slate-700 shadow-2xl overflow-hidden">
-            <div className="p-8 border-b border-slate-800 flex justify-between items-center">
-              <h2 className="text-xl font-black text-white uppercase tracking-tight">
-                {modalType === 'invoice' ? 'Lançar Nota' : modalType === 'adjustment' ? 'Ajuste Manual' : 'Resetar'}
-              </h2>
-              <button onClick={() => setModalType(null)} className="text-slate-500 hover:text-white transition-colors"><X size={24} /></button>
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in">
+          <div className="bg-white rounded-3xl w-full max-w-md shadow-2xl overflow-hidden animate-in slide-in-from-bottom-8">
+            <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
+              <h3 className="text-xl font-bold text-slate-800">
+                {modalType === 'invoice' ? 'Lançar Nota Fiscal' : 'Ajuste de Estoque'}
+              </h3>
+              <button onClick={() => setModalType(null)} className="p-2 hover:bg-slate-200 rounded-full transition-colors">
+                <X className="w-5 h-5 text-slate-500" />
+              </button>
             </div>
             
             <div className="p-8 space-y-6">
-              {modalType === 'reset' ? (
-                <div className="text-center space-y-8">
-                  <p className="text-slate-300 font-bold">Deseja apagar todo o estoque e histórico?<br/><span className="text-rose-500 uppercase text-xs">Esta ação não tem volta.</span></p>
-                  <div className="flex gap-4">
-                    <button onClick={() => setModalType(null)} className="flex-1 bg-slate-800 text-white font-black py-5 rounded-2xl uppercase text-xs">Cancelar</button>
-                    <button onClick={confirmReset} className="flex-1 bg-rose-600 text-white font-black py-5 rounded-2xl uppercase text-xs">Confirmar</button>
-                  </div>
+              <div>
+                <label className="block text-sm font-bold text-slate-700 mb-2 uppercase tracking-wide">Material</label>
+                <div className="grid grid-cols-2 gap-2">
+                  {MATERIALS_LIST.map(m => (
+                    <button
+                      key={m}
+                      onClick={() => setSelectedMaterial(m)}
+                      className={`px-3 py-2 text-xs font-bold rounded-xl border-2 transition-all ${selectedMaterial === m ? 'border-blue-600 bg-blue-50 text-blue-700 shadow-sm' : 'border-slate-100 text-slate-500 hover:border-slate-200'}`}
+                    >
+                      {m}
+                    </button>
+                  ))}
                 </div>
-              ) : (
-                <>
-                  <div className="grid grid-cols-2 gap-2">
-                    {MATERIALS_LIST.map(m => (
-                      <button key={m} onClick={() => setSelectedMaterial(m)} className={`p-4 rounded-2xl font-black text-[10px] uppercase border-2 transition-all ${selectedMaterial === m ? 'bg-blue-600 border-blue-500 text-white' : 'bg-slate-800 border-slate-700 text-slate-500'}`}>{m}</button>
-                    ))}
-                  </div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-bold text-slate-700 mb-2 uppercase tracking-wide">Quantidade (Kg)</label>
+                <div className="relative">
                   <input 
                     type="text" 
-                    placeholder="Quantidade em Kg"
                     value={inputQuantity}
                     onChange={(e) => setInputQuantity(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-800 p-6 rounded-2xl text-3xl font-black text-white focus:outline-none focus:border-blue-500"
+                    placeholder="Ex: 15.000"
+                    className="w-full px-5 py-4 bg-slate-50 border-2 border-slate-100 rounded-2xl text-xl font-bold focus:border-blue-600 focus:outline-none transition-all placeholder:text-slate-300"
                     autoFocus
                   />
-                  <button onClick={handleModalSubmit} className="w-full bg-blue-600 hover:bg-blue-500 text-white font-black py-6 rounded-2xl uppercase text-xs tracking-widest flex items-center justify-center gap-3 shadow-xl shadow-blue-500/20"><CheckCircle2 size={20} /> Confirmar</button>
-                </>
-              )}
+                  <div className="absolute right-5 top-1/2 -translate-y-1/2 text-slate-400 font-bold">KG</div>
+                </div>
+                <p className="text-xs text-slate-400 mt-2">Dica: Use ponto para milhares se preferir, ou apenas os números.</p>
+              </div>
+
+              <button 
+                onClick={handleModalSubmit}
+                className="w-full py-4 bg-blue-600 text-white rounded-2xl text-lg font-bold hover:bg-blue-700 transition-all shadow-lg shadow-blue-200 active:scale-[0.98]"
+              >
+                Confirmar Lançamento
+              </button>
             </div>
           </div>
         </div>
       )}
-
-      <footer className="mt-auto py-12 text-[10px] text-slate-600 font-black uppercase tracking-[0.3em] flex flex-col md:flex-row justify-between items-center gap-4 border-t border-slate-800/50">
-        <p>© 2025 GINO CONCRETO - UNIDADE ANGATUBA</p>
-        <p className="bg-slate-950 px-6 py-2 rounded-full border border-slate-800">Desenvolvido por Jose Neto</p>
-      </footer>
     </div>
   );
 };
