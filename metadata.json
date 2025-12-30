@@ -1,0 +1,7 @@
+{
+  "name": "Gino Concreto - Controle de Estoque Angatuba",
+  "description": "Sistema profissional para gestão de estoque de materiais de construção, permitindo entrada via notas fiscais e saída automatizada via leitura de relatórios de balança PDF utilizando IA.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
