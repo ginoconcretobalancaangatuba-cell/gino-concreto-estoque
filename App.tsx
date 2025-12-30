@@ -12,9 +12,6 @@ import {
   Settings2,
   X,
   CheckCircle2,
-  Key,
-  ShieldAlert,
-  ExternalLink,
   Loader2,
   Lock
 } from 'lucide-react';
@@ -62,7 +59,6 @@ const App: React.FC = () => {
   });
 
   const [isLoading, setIsLoading] = useState(false);
-  const [hasApiKey, setHasApiKey] = useState<boolean>(true); // Inicializamos como true para não bloquear a UI
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [modalType, setModalType] = useState<'invoice' | 'adjustment' | 'reset' | null>(null);
@@ -73,35 +69,6 @@ const App: React.FC = () => {
     localStorage.setItem(STORAGE_KEY_STOCK, JSON.stringify(stock));
     localStorage.setItem(STORAGE_KEY_HISTORY, JSON.stringify(history));
   }, [stock, history]);
-
-  const checkKeyStatus = async () => {
-    if ((window as any).aistudio) {
-      try {
-        const has = await (window as any).aistudio.hasSelectedApiKey();
-        setHasApiKey(has);
-      } catch (e) {
-        setHasApiKey(false);
-      }
-    } else {
-      // Se não houver aistudio e não houver env, assume que precisa configurar
-      setHasApiKey(!!process.env.API_KEY);
-    }
-  };
-
-  useEffect(() => {
-    checkKeyStatus();
-  }, []);
-
-  const handleConfigKey = async () => {
-    if ((window as any).aistudio) {
-      try {
-        await (window as any).aistudio.openSelectKey();
-        setHasApiKey(true); // Assume sucesso conforme diretriz
-      } catch (e) {
-        console.error(e);
-      }
-    }
-  };
 
   const generateId = () => Date.now().toString(36) + Math.random().toString(36).substring(2);
 
@@ -184,9 +151,12 @@ const App: React.FC = () => {
       }
     } catch (e: any) {
       console.error(e);
-      if (e.message?.includes("ERRO_CHAVE") || e.message?.includes("API key not valid")) {
-        alert("Erro de Acesso: A chave de API expirou ou é inválida. Clique em 'Configurar Acesso' e selecione uma chave de um projeto com faturamento ativo.");
-        setHasApiKey(false);
+      // Se houver erro de chave, agora sugerimos a ação apenas no momento do erro
+      if (e.message?.includes("API key not valid") || e.message?.includes("CHAVE") || e.message?.includes("Requested entity was not found")) {
+        const confirmConfig = confirm("Erro de Acesso: A chave de API não foi detectada ou é inválida. Deseja selecionar uma chave agora?");
+        if (confirmConfig && (window as any).aistudio) {
+          await (window as any).aistudio.openSelectKey();
+        }
       } else {
         alert("Falha ao processar arquivo: " + e.message);
       }
@@ -218,33 +188,14 @@ const App: React.FC = () => {
             <h1 className="text-xl font-bold tracking-tight">GINO <span className="text-slate-400 font-normal">| Concreto</span></h1>
           </div>
           <div className="flex items-center gap-4">
-            <button onClick={handleConfigKey} className="flex items-center gap-2 px-3 py-1.5 text-xs font-bold text-slate-600 hover:bg-slate-100 rounded-lg transition-all">
-              <Key className="w-4 h-4" /> CONFIGURAR ACESSO
-            </button>
             <button onClick={handleDownloadPDF} className="flex items-center gap-2 px-4 py-2 bg-slate-900 text-white rounded-lg hover:bg-slate-800 transition-all font-medium text-sm">
-              <Download className="w-4 h-4" /> Exportar
+              <Download className="w-4 h-4" /> Exportar Relatório
             </button>
           </div>
         </div>
       </header>
 
       <main className="max-w-7xl mx-auto px-4 pt-8 space-y-8">
-        {!hasApiKey && (
-          <div className="bg-rose-50 border border-rose-200 rounded-2xl p-6 flex items-start gap-4 animate-in fade-in duration-500">
-            <div className="p-3 bg-rose-100 rounded-full text-rose-600"><ShieldAlert className="w-6 h-6" /></div>
-            <div className="flex-1">
-              <h3 className="font-bold text-rose-900 text-lg">Ação Necessária: Chave de API Ausente</h3>
-              <p className="text-rose-800 text-sm mt-1">A leitura automática de balança requer uma chave de API válida do Google Cloud com faturamento ativo.</p>
-              <div className="mt-4 flex gap-4">
-                <button onClick={handleConfigKey} className="px-5 py-2.5 bg-rose-600 text-white rounded-xl text-sm font-bold hover:bg-rose-700 transition-all shadow-lg shadow-rose-200 flex items-center gap-2">
-                  <Key className="w-4 h-4" /> Vincular Chave Agora
-                </button>
-                <a href="https://ai.google.dev/gemini-api/docs/billing" target="_blank" rel="noreferrer" className="text-rose-700 text-sm font-bold flex items-center gap-1 hover:underline">Documentação <ExternalLink className="w-3 h-3" /></a>
-              </div>
-            </div>
-          </div>
-        )}
-
         <section className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
           {MATERIALS_LIST.map((material) => {
             const currentStock = stock[material];
@@ -275,18 +226,28 @@ const App: React.FC = () => {
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
                 <button onClick={() => setModalType('invoice')} className="flex flex-col items-center gap-4 p-8 border-2 border-dashed border-slate-200 rounded-3xl hover:border-blue-500 hover:bg-blue-50 transition-all group">
                   <div className="p-4 bg-blue-100 rounded-2xl group-hover:scale-110 transition-transform"><PlusCircle className="w-8 h-8 text-blue-600" /></div>
-                  <div className="text-center"><span className="block font-black text-slate-800 uppercase text-xs tracking-wider">Entrada de Material</span><span className="text-xs text-slate-500 mt-1 block">Lançamento via Nota Fiscal</span></div>
+                  <div className="text-center">
+                    <span className="block font-black text-slate-800 uppercase text-xs tracking-wider">Entrada de Material</span>
+                    <span className="text-xs text-slate-500 mt-1 block">Lançamento via Nota Fiscal</span>
+                  </div>
                 </button>
                 <div className="relative">
                   <input type="file" ref={fileInputRef} onChange={(e) => e.target.files?.[0] && processScaleReport(e.target.files[0])} className="hidden" accept="image/*,application/pdf" />
                   <button disabled={isLoading} onClick={() => fileInputRef.current?.click()} className={`w-full flex flex-col items-center gap-4 p-8 border-2 border-dashed border-slate-200 rounded-3xl transition-all group ${isLoading ? 'opacity-50 cursor-wait' : 'hover:border-emerald-500 hover:bg-emerald-50'}`}>
-                    <div className="p-4 bg-emerald-100 rounded-2xl group-hover:scale-110 transition-transform">{isLoading ? <Loader2 className="w-8 h-8 text-emerald-600 animate-spin" /> : <FileUp className="w-8 h-8 text-emerald-600" />}</div>
-                    <div className="text-center"><span className="block font-black text-slate-800 uppercase text-xs tracking-wider">{isLoading ? 'Processando...' : 'Ticket de Balança'}</span><span className="text-xs text-slate-500 mt-1 block">Leitura Automática por IA</span></div>
+                    <div className="p-4 bg-emerald-100 rounded-2xl group-hover:scale-110 transition-transform">
+                      {isLoading ? <Loader2 className="w-8 h-8 text-emerald-600 animate-spin" /> : <FileUp className="w-8 h-8 text-emerald-600" />}
+                    </div>
+                    <div className="text-center">
+                      <span className="block font-black text-slate-800 uppercase text-xs tracking-wider">{isLoading ? 'Processando...' : 'Ticket de Balança'}</span>
+                      <span className="text-xs text-slate-500 mt-1 block">Leitura Automática por IA</span>
+                    </div>
                   </button>
                 </div>
               </div>
               <div className="mt-8 pt-8 border-t border-slate-100 flex justify-center">
-                <button onClick={() => setModalType('adjustment')} className="text-xs font-bold text-slate-400 hover:text-blue-600 transition-colors uppercase tracking-widest flex items-center gap-2"><Settings2 className="w-4 h-4" /> Ajuste Manual de Inventário</button>
+                <button onClick={() => setModalType('adjustment')} className="text-xs font-bold text-slate-400 hover:text-blue-600 transition-colors uppercase tracking-widest flex items-center gap-2">
+                  <Settings2 className="w-4 h-4" /> Ajuste Manual de Inventário
+                </button>
               </div>
             </div>
 
