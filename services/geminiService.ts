@@ -1,8 +1,6 @@
 
 import { GoogleGenAI, Type } from "@google/genai";
 
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-
 export interface ScaleReportExtraction {
   brita0: number;
   brita1: number;
@@ -12,6 +10,15 @@ export interface ScaleReportExtraction {
 }
 
 export async function parseScaleReport(mimeType: string, base64Data: string): Promise<ScaleReportExtraction> {
+  // Inicializamos a API apenas no momento da chamada para garantir que process.env.API_KEY esteja disponível
+  // e não travar o carregamento inicial do app.
+  if (!process.env.API_KEY) {
+    console.error("API_KEY não configurada no ambiente.");
+    throw new Error("Erro de configuração: Chave de API ausente.");
+  }
+
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+
   try {
     const response = await ai.models.generateContent({
       model: "gemini-3-flash-preview",
