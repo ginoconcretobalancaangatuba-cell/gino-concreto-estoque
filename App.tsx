@@ -11,7 +11,8 @@ import {
   Package,
   Settings2,
   X,
-  CheckCircle2
+  CheckCircle2,
+  Key
 } from 'lucide-react';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
@@ -29,11 +30,13 @@ import {
 } from './constants.ts';
 import { parseScaleReport, ScaleReportExtraction } from './services/geminiService.ts';
 
+// Removed manual Window interface declaration to avoid conflict with pre-existing AIStudio types 
+// in the runtime environment. We use casting for accessing window.aistudio.
+
 const App: React.FC = () => {
   const STORAGE_KEY_STOCK = 'gino_stock_v5';
   const STORAGE_KEY_HISTORY = 'gino_history_v5';
 
-  // --- Estados do Sistema ---
   const [stock, setStock] = useState<StockState>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEY_STOCK);
@@ -58,9 +61,9 @@ const App: React.FC = () => {
   });
 
   const [isLoading, setIsLoading] = useState(false);
+  const [hasApiKey, setHasApiKey] = useState(true);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // --- Estados do Modal ---
   const [modalType, setModalType] = useState<'invoice' | 'adjustment' | 'reset' | null>(null);
   const [selectedMaterial, setSelectedMaterial] = useState<MaterialName>('Brita 0');
   const [inputQuantity, setInputQuantity] = useState('');
@@ -69,6 +72,32 @@ const App: React.FC = () => {
     localStorage.setItem(STORAGE_KEY_STOCK, JSON.stringify(stock));
     localStorage.setItem(STORAGE_KEY_HISTORY, JSON.stringify(history));
   }, [stock, history]);
+
+  // Check for API key presence on load.
+  useEffect(() => {
+    const checkKey = async () => {
+      if (process.env.API_KEY) {
+        setHasApiKey(true);
+      } else if ((window as any).aistudio) {
+        // Accessing environment-injected aistudio helper.
+        const selected = await (window as any).aistudio.hasSelectedApiKey();
+        setHasApiKey(selected);
+      } else {
+        setHasApiKey(false);
+      }
+    };
+    checkKey();
+  }, []);
+
+  const handleConfigKey = async () => {
+    if ((window as any).aistudio) {
+      await (window as any).aistudio.openSelectKey();
+      // Assume success after opening selection to mitigate race conditions.
+      setHasApiKey(true);
+    } else {
+      alert("Para configurar a chave, você deve estar em um ambiente que suporte Google AI Studio.");
+    }
+  };
 
   const generateId = () => Date.now().toString(36) + Math.random().toString(36).substring(2);
 
@@ -89,8 +118,6 @@ const App: React.FC = () => {
     const num = parseFloat(cleaned);
     return isNaN(num) ? 0 : num;
   };
-
-  // --- Lógica de Ações ---
 
   const handleModalSubmit = () => {
     const qty = parseNumber(inputQuantity);
@@ -117,21 +144,17 @@ const App: React.FC = () => {
     
     try {
       const reader = new FileReader();
-      
       reader.onload = async () => {
         try {
           const result = reader.result as string;
           const mimeType = file.type || (file.name.endsWith('.pdf') ? 'application/pdf' : 'image/jpeg');
           const base64 = result.split(',')[1];
           
-          if (!base64) throw new Error("Falha ao converter arquivo para base64.");
-
           const data: ScaleReportExtraction = await parseScaleReport(mimeType, base64);
-
           const totalWeight = data.brita0 + data.brita1 + data.areiaMedia + data.areiaBrita + data.areiaFina;
           
           if (totalWeight === 0) {
-            alert('A IA não conseguiu encontrar pesos de materiais neste arquivo. Certifique-se de que é um ticket de balança legível.');
+            alert('Não foi possível encontrar pesos de materiais. Verifique se o ticket está legível.');
             setIsLoading(false);
             return;
           }
@@ -146,41 +169,29 @@ const App: React.FC = () => {
             return updated;
           });
 
-          addTransaction(
-            'SCALE_REPORT', 
-            undefined, 
-            0, 
-            `Balança: Saída de ${totalWeight.toLocaleString('pt-BR')} kg de materiais.`
-          );
-          
-          alert(`Sucesso! Foram abatidos ${totalWeight.toLocaleString('pt-BR')} kg do estoque.`);
+          addTransaction('SCALE_REPORT', undefined, 0, `Balança: Abatimento de ${totalWeight.toLocaleString('pt-BR')} kg.`);
+          alert(`Sucesso! Abatidos ${totalWeight.toLocaleString('pt-BR')} kg.`);
         } catch (err: any) {
-          console.error("Erro interno no processamento:", err);
-          const msg = err.message?.includes("CHAVE_AUSENTE") 
-            ? "Erro: Chave de API não configurada no Vercel." 
-            : "Erro ao analisar os dados do arquivo. O PDF pode estar protegido ou em formato inválido.";
-          alert(msg);
+          // Reset key status if key issues are detected.
+          if (err.message?.includes("API key not valid") || err.message?.includes("Requested entity was not found")) {
+            alert("A chave de acesso expirou. Por favor, reconfigure o acesso.");
+            setHasApiKey(false);
+          } else {
+            alert("Erro ao ler o PDF. Tente enviar novamente.");
+          }
         } finally {
           setIsLoading(false);
         }
       };
-
-      reader.onerror = () => {
-        alert("Erro ao ler o arquivo físico do seu dispositivo.");
-        setIsLoading(false);
-      };
-
       reader.readAsDataURL(file);
     } catch (error) {
-      console.error("Erro geral no upload:", error);
-      alert('Erro inesperado ao processar o upload.');
+      alert('Erro inesperado no upload.');
       setIsLoading(false);
     }
   };
 
   const confirmReset = () => {
-    localStorage.removeItem(STORAGE_KEY_STOCK);
-    localStorage.removeItem(STORAGE_KEY_HISTORY);
+    localStorage.clear();
     setStock({ 'Brita 0': 0, 'Brita 1': 0, 'Areia Média': 0, 'Areia de Brita': 0 });
     setHistory([]);
     setModalType(null);
@@ -192,48 +203,22 @@ const App: React.FC = () => {
     doc.setTextColor(37, 99, 235);
     doc.text('Gino Concreto', 14, 20);
     doc.setFontSize(11);
-    doc.setTextColor(100);
-    doc.text('Usina de Angatuba - Relatório Geral de Estoque', 14, 28);
-    doc.line(14, 32, 196, 32);
-    
+    doc.text('Relatório Geral de Estoque - Angatuba', 14, 28);
     autoTable(doc, {
       startY: 38,
       head: [['Material', 'Estoque (Kg)', 'Status']],
-      body: MATERIALS_LIST.map(m => [
-        m, 
-        stock[m].toLocaleString('pt-BR'),
-        stock[m] < STOCK_MIN_THRESHOLD ? 'ESTOQUE BAIXO' : 'OK'
-      ]),
-      headStyles: { fillColor: [37, 99, 235], fontStyle: 'bold' },
-      didParseCell: (data) => {
-        if (data.section === 'body') {
-          const materialName = data.row.raw[0] as MaterialName;
-          if (stock[materialName] < STOCK_MIN_THRESHOLD) {
-            data.cell.styles.textColor = [220, 38, 38];
-          }
-        }
-      }
+      body: MATERIALS_LIST.map(m => [m, stock[m].toLocaleString('pt-BR'), stock[m] < STOCK_MIN_THRESHOLD ? 'ESTOQUE BAIXO' : 'OK']),
+      headStyles: { fillColor: [37, 99, 235] }
     });
-
-    const finalY = (doc as any).lastAutoTable.finalY || 100;
-    doc.setFontSize(14);
-    doc.setTextColor(0);
-    doc.text('Estimativa de Produção', 14, finalY + 15);
-    doc.setFontSize(10);
-    doc.setTextColor(60);
-    doc.text(`Cargas de 8m³ possíveis: ${loadsPossible}`, 14, finalY + 25);
-    doc.text(`Volume total: ${m3Possible.toFixed(2)} m³`, 14, finalY + 32);
-    doc.save(`gino_angatuba_relatorio_${new Date().getTime()}.pdf`);
+    doc.save(`gino_estoque_${new Date().getTime()}.pdf`);
   };
 
-  const loadsPossible = Math.floor(
-    Math.min(
-      stock['Brita 0'] / RECIPE['Brita 0'] || 0,
-      stock['Brita 1'] / RECIPE['Brita 1'] || 0,
-      stock['Areia Média'] / RECIPE['Areia Média'] || 0,
-      stock['Areia de Brita'] / RECIPE['Areia de Brita'] || 0
-    )
-  ) || 0;
+  const loadsPossible = Math.floor(Math.min(
+    stock['Brita 0'] / RECIPE['Brita 0'] || 0,
+    stock['Brita 1'] / RECIPE['Brita 1'] || 0,
+    stock['Areia Média'] / RECIPE['Areia Média'] || 0,
+    stock['Areia de Brita'] / RECIPE['Areia de Brita'] || 0
+  )) || 0;
   const m3Possible = loadsPossible * LOAD_VOLUME_M3;
 
   const getLastInvoice = (material: MaterialName) => history.find(h => h.type === 'INVOICE' && h.material === material);
@@ -243,8 +228,20 @@ const App: React.FC = () => {
     <div className="min-h-screen p-4 md:p-8 flex flex-col gap-6 max-w-7xl mx-auto">
       
       {/* HEADER */}
-      <header className="flex flex-col items-center bg-slate-900/90 p-8 md:p-12 rounded-[40px] border border-slate-700/50 shadow-2xl gap-8">
-        <div className="text-center">
+      <header className="flex flex-col items-center bg-slate-900/90 p-8 md:p-12 rounded-[40px] border border-slate-700/50 shadow-2xl gap-8 relative overflow-hidden">
+        
+        {/* Banner de Aviso de Chave */}
+        {!hasApiKey && (
+          <div className="absolute top-0 left-0 w-full bg-rose-600/90 text-white py-2 px-4 text-center text-[10px] font-black uppercase tracking-[0.2em] flex items-center justify-center gap-3 animate-pulse">
+            <AlertTriangle size={14} />
+            Configuração de Acesso Pendente
+            <button onClick={handleConfigKey} className="ml-4 bg-white text-rose-600 px-3 py-1 rounded-full hover:bg-slate-100 transition-colors">
+              Configurar Agora
+            </button>
+          </div>
+        )}
+
+        <div className="text-center mt-4">
           <h1 className="text-5xl md:text-7xl font-black tracking-tighter mb-2">
             <span className="text-blue-500 uppercase">Gino</span> <span className="text-white uppercase">Concreto</span>
           </h1>
@@ -252,6 +249,12 @@ const App: React.FC = () => {
         </div>
 
         <div className="flex flex-wrap justify-center gap-4">
+          {!hasApiKey && (
+            <button onClick={handleConfigKey} className="flex items-center gap-3 bg-amber-600 hover:bg-amber-500 text-white px-8 py-4 rounded-2xl font-black transition-all shadow-xl hover:-translate-y-1 active:scale-95 text-sm uppercase">
+              <Key size={20} /> Configurar Acesso
+            </button>
+          )}
+
           <button onClick={() => setModalType('invoice')} className="flex items-center gap-3 bg-blue-600 hover:bg-blue-500 text-white px-8 py-4 rounded-2xl font-black transition-all shadow-xl hover:-translate-y-1 active:scale-95 text-sm uppercase">
             <PlusCircle size={20} /> Lançar Nota
           </button>
@@ -262,10 +265,10 @@ const App: React.FC = () => {
           
           <button 
             onClick={() => fileInputRef.current?.click()} 
-            disabled={isLoading}
-            className={`flex items-center gap-3 bg-emerald-600 hover:bg-emerald-500 text-white px-8 py-4 rounded-2xl font-black transition-all shadow-xl hover:-translate-y-1 active:scale-95 text-sm uppercase ${isLoading ? 'opacity-50 cursor-wait' : ''}`}
+            disabled={isLoading || !hasApiKey}
+            className={`flex items-center gap-3 bg-emerald-600 hover:bg-emerald-500 text-white px-8 py-4 rounded-2xl font-black transition-all shadow-xl hover:-translate-y-1 active:scale-95 text-sm uppercase ${isLoading || !hasApiKey ? 'opacity-50 cursor-not-allowed' : ''}`}
           >
-            <FileUp size={20} /> {isLoading ? 'Analisando Balança...' : 'Enviar Balança'}
+            <FileUp size={20} /> {isLoading ? 'Lendo Balança...' : 'Enviar Balança'}
           </button>
           
           <button onClick={downloadReport} className="flex items-center gap-3 bg-indigo-600 hover:bg-indigo-500 text-white px-8 py-4 rounded-2xl font-black transition-all shadow-xl hover:-translate-y-1 active:scale-95 text-sm uppercase">
@@ -332,10 +335,7 @@ const App: React.FC = () => {
                   <span className="text-7xl font-black text-white leading-none">{loadsPossible}</span>
                 </div>
                 <div className="w-full bg-slate-950 h-3 rounded-full overflow-hidden border border-slate-700">
-                  <div 
-                    className="h-full bg-blue-500 shadow-[0_0_20px_rgba(59,130,246,0.5)] transition-all duration-1000" 
-                    style={{ width: `${Math.min(100, (loadsPossible / 40) * 100)}%` }} 
-                  />
+                  <div className="h-full bg-blue-500 shadow-[0_0_20px_rgba(59,130,246,0.5)] transition-all duration-1000" style={{ width: `${Math.min(100, (loadsPossible / 40) * 100)}%` }} />
                 </div>
               </div>
               <div className="bg-slate-950/50 p-6 rounded-2xl border border-blue-500/10 text-5xl font-black text-blue-400">
@@ -351,12 +351,12 @@ const App: React.FC = () => {
             {getLastReport() ? (
               <div className="space-y-4">
                 <p className="text-[10px] text-slate-500 font-black">{new Date(getLastReport()!.timestamp).toLocaleString('pt-BR')}</p>
-                <div className="text-[11px] text-slate-400 italic bg-slate-900/40 p-5 rounded-2xl border border-slate-800/50">
+                <div className="text-[11px] text-slate-400 italic bg-slate-900/40 p-5 rounded-2xl border border-slate-800/50 leading-relaxed">
                   {getLastReport()?.details}
                 </div>
               </div>
             ) : (
-              <p className="text-[10px] text-slate-600 text-center py-10">Nenhuma leitura realizada</p>
+              <p className="text-[10px] text-slate-600 text-center py-10 uppercase font-black">Nenhuma leitura realizada</p>
             )}
           </div>
         </div>
@@ -367,7 +367,9 @@ const App: React.FC = () => {
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/90 backdrop-blur-md">
           <div className="bg-slate-900 w-full max-w-lg rounded-[40px] border border-slate-700 shadow-2xl overflow-hidden">
             <div className="p-8 border-b border-slate-800 flex justify-between items-center">
-              <h2 className="text-xl font-black text-white uppercase">{modalType === 'invoice' ? 'Lançar Nota' : modalType === 'adjustment' ? 'Ajuste Manual' : 'Resetar'}</h2>
+              <h2 className="text-xl font-black text-white uppercase tracking-tight">
+                {modalType === 'invoice' ? 'Lançar Nota' : modalType === 'adjustment' ? 'Ajuste Manual' : 'Resetar'}
+              </h2>
               <button onClick={() => setModalType(null)} className="text-slate-500 hover:text-white transition-colors"><X size={24} /></button>
             </div>
             
@@ -393,8 +395,9 @@ const App: React.FC = () => {
                     value={inputQuantity}
                     onChange={(e) => setInputQuantity(e.target.value)}
                     className="w-full bg-slate-950 border border-slate-800 p-6 rounded-2xl text-3xl font-black text-white focus:outline-none focus:border-blue-500"
+                    autoFocus
                   />
-                  <button onClick={handleModalSubmit} className="w-full bg-blue-600 hover:bg-blue-500 text-white font-black py-6 rounded-2xl uppercase text-xs tracking-widest flex items-center justify-center gap-3"><CheckCircle2 size={20} /> Confirmar</button>
+                  <button onClick={handleModalSubmit} className="w-full bg-blue-600 hover:bg-blue-500 text-white font-black py-6 rounded-2xl uppercase text-xs tracking-widest flex items-center justify-center gap-3 shadow-xl shadow-blue-500/20"><CheckCircle2 size={20} /> Confirmar</button>
                 </>
               )}
             </div>
@@ -402,9 +405,9 @@ const App: React.FC = () => {
         </div>
       )}
 
-      <footer className="mt-auto py-12 text-[10px] text-slate-600 font-black uppercase tracking-[0.3em] flex flex-col md:flex-row justify-between items-center gap-4">
-        <p>© 2025 GINO CONCRETO - ANGATUBA</p>
-        <p>Desenvolvido por Jose Neto</p>
+      <footer className="mt-auto py-12 text-[10px] text-slate-600 font-black uppercase tracking-[0.3em] flex flex-col md:flex-row justify-between items-center gap-4 border-t border-slate-800/50">
+        <p>© 2025 GINO CONCRETO - UNIDADE ANGATUBA</p>
+        <p className="bg-slate-950 px-6 py-2 rounded-full border border-slate-800">Desenvolvido por Jose Neto</p>
       </footer>
     </div>
   );
