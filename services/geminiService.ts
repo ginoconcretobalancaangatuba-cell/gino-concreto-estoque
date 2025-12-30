@@ -11,20 +11,14 @@ export interface ScaleReportExtraction {
 
 function cleanJsonResponse(text: string): string {
   let cleaned = text.trim();
-  // Remove possible markdown code block wrappers
   cleaned = cleaned.replace(/^```json\n?/i, "").replace(/\n?```$/i, "").trim();
   return cleaned;
 }
 
 export async function parseScaleReport(mimeType: string, base64Data: string): Promise<ScaleReportExtraction> {
-  const apiKey = process.env.API_KEY;
-  
-  if (!apiKey || apiKey === 'undefined' || apiKey === '') {
-    throw new Error("CHAVE_AUSENTE: A chave da API não foi detectada. Por favor, use o botão 'CONFIGURAR ACESSO' para selecionar sua chave do projeto Google Cloud (com faturamento ativo).");
-  }
-
-  // Create instance right before use with the current key
-  const ai = new GoogleGenAI({ apiKey });
+  // Conforme diretrizes, instanciamos a cada chamada para garantir que pegamos a chave mais atual do ambiente.
+  // Não fazemos validação manual de string aqui para não bloquear o fluxo injetado pela Vercel/AI Studio.
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
 
   try {
     const response = await ai.models.generateContent({
@@ -39,22 +33,22 @@ export async function parseScaleReport(mimeType: string, base64Data: string): Pr
           },
           {
             text: `Aja como um especialista em tickets de pesagem de concreto.
-            Analise a imagem/PDF e extraia os valores de PESO LÍQUIDO (Kg) carregado.
+            Analise o ticket e extraia os valores de PESO LÍQUIDO REAL (Kg) carregado.
             
-            REGRAS:
-            1. Busque o peso efetivamente carregado (REAL, LÍQUIDO ou CARREGADO).
-            2. Se o ticket estiver em Toneladas (T), multiplique por 1000 para converter para Kg.
-            3. Ignore o peso "Alvo" (Target).
-            4. Se não encontrar o material, retorne 0.
+            REGRAS CRÍTICAS:
+            1. Procure por campos: 'REAL', 'LIQ', 'CARREGADO' ou 'PESO'.
+            2. Ignore colunas de 'ALVO' ou 'PROGRAMADO'.
+            3. Se o valor estiver em Toneladas (ex: 4.25), multiplique por 1000 para converter para Kg (4250).
+            4. Se não encontrar o material no ticket, use o valor 0.
 
-            MAPEAMENTO JSON:
-            - 'brita0': Brita 0, B0, Pedrisco ou similar.
-            - 'brita1': Brita 1, B1 ou similar.
-            - 'areiaMedia': Areia Média, Rio, Lavada ou Natural.
-            - 'areiaBrita': Areia de Brita, Pó de Pedra ou Areia Industrial.
+            MAPEAMENTO:
+            - 'brita0': Brita 0, B0, Pedrisco, B.9,5mm.
+            - 'brita1': Brita 1, B1, B.19mm.
+            - 'areiaMedia': Areia Média, Areia Rio, Areia Natural.
+            - 'areiaBrita': Areia de Brita, Pó de Pedra, Areia Industrial.
             - 'areiaFina': Areia Fina.
 
-            IMPORTANTE: Retorne APENAS o objeto JSON.`,
+            Retorne estritamente um JSON.`,
           },
         ],
       },
@@ -76,21 +70,13 @@ export async function parseScaleReport(mimeType: string, base64Data: string): Pr
     });
 
     const rawText = response.text || '{"brita0":0,"brita1":0,"areiaMedia":0,"areiaBrita":0,"areiaFina":0}';
-    const cleanedText = cleanJsonResponse(rawText);
-    
-    try {
-      return JSON.parse(cleanedText) as ScaleReportExtraction;
-    } catch (parseError) {
-      console.error("JSON inválido retornado pela IA:", cleanedText);
-      throw new Error("FORMATO_INVALIDO: Não foi possível processar a resposta da balança.");
-    }
+    return JSON.parse(cleanJsonResponse(rawText)) as ScaleReportExtraction;
   } catch (e: any) {
-    console.error("Erro Gemini:", e);
-    
+    console.error("Erro interno no Gemini:", e);
+    // Se o erro for de entidade não encontrada, provavelmente é a chave inválida ou projeto sem faturamento.
     if (e.message?.includes("Requested entity was not found")) {
-      throw new Error("CHAVE_INVALIDA: A chave API selecionada não é válida para este modelo. Certifique-se de usar um projeto pago.");
+      throw new Error("ERRO_CHAVE: A chave selecionada não possui acesso a este modelo ou o faturamento não está ativo no Google Cloud.");
     }
-    
     throw e;
   }
 }
