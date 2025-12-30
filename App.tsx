@@ -116,29 +116,55 @@ const App: React.FC = () => {
     try {
       const reader = new FileReader();
       reader.onload = async () => {
-        const result = reader.result as string;
-        const mimeType = file.type || (result.startsWith('data:application/pdf') ? 'application/pdf' : 'image/jpeg');
-        const base64 = result.split(',')[1];
-        
-        const data: ScaleReportExtraction = await parseScaleReport(mimeType, base64);
+        try {
+          const result = reader.result as string;
+          const mimeType = file.type || (result.startsWith('data:application/pdf') ? 'application/pdf' : 'image/jpeg');
+          const base64 = result.split(',')[1];
+          
+          const data: ScaleReportExtraction = await parseScaleReport(mimeType, base64);
 
-        setStock(prev => {
-          const updated = { ...prev };
-          updated['Brita 0'] = Math.max(0, updated['Brita 0'] - data.brita0);
-          updated['Brita 1'] = Math.max(0, updated['Brita 1'] - data.brita1);
-          // Regra Areia Fina abate na Areia Média
-          const totalAreia = data.areiaMedia + data.areiaFina;
-          updated['Areia Média'] = Math.max(0, updated['Areia Média'] - totalAreia);
-          updated['Areia de Brita'] = Math.max(0, updated['Areia de Brita'] - data.areiaBrita);
-          return updated;
-        });
+          // Verifica se a extração trouxe valores válidos
+          const hasData = (data.brita0 + data.brita1 + data.areiaMedia + data.areiaBrita + data.areiaFina) > 0;
+          
+          if (!hasData) {
+            alert('Não foi possível identificar pesos de materiais neste arquivo. Verifique se o PDF está legível.');
+            setIsLoading(false);
+            return;
+          }
 
-        addTransaction('SCALE_REPORT', undefined, 0, `Balança: B0:${data.brita0}kg, B1:${data.brita1}kg, Areias:${data.areiaMedia + data.areiaFina}kg, AB:${data.areiaBrita}kg`);
+          setStock(prev => {
+            const updated = { ...prev };
+            updated['Brita 0'] = Math.max(0, updated['Brita 0'] - data.brita0);
+            updated['Brita 1'] = Math.max(0, updated['Brita 1'] - data.brita1);
+            const totalAreia = data.areiaMedia + data.areiaFina;
+            updated['Areia Média'] = Math.max(0, updated['Areia Média'] - totalAreia);
+            updated['Areia de Brita'] = Math.max(0, updated['Areia de Brita'] - data.areiaBrita);
+            return updated;
+          });
+
+          addTransaction(
+            'SCALE_REPORT', 
+            undefined, 
+            0, 
+            `Saída: B0:${data.brita0}kg, B1:${data.brita1}kg, Areia M:${data.areiaMedia}kg, Areia B:${data.areiaBrita}kg, Areia F:${data.areiaFina}kg`
+          );
+          
+          alert('Relatório de balança processado com sucesso! O estoque foi atualizado.');
+        } catch (innerError) {
+          console.error("Erro no processamento interno:", innerError);
+          alert('Erro ao analisar os dados do arquivo.');
+        } finally {
+          setIsLoading(false);
+        }
+      };
+      reader.onerror = () => {
+        alert('Erro ao ler o arquivo físico.');
+        setIsLoading(false);
       };
       reader.readAsDataURL(file);
     } catch (error) {
-      alert('Erro ao processar PDF.');
-    } finally {
+      console.error("Erro ao processar PDF:", error);
+      alert('Erro inesperado ao enviar o arquivo.');
       setIsLoading(false);
     }
   };
@@ -248,9 +274,9 @@ const App: React.FC = () => {
           <button 
             onClick={() => fileInputRef.current?.click()} 
             disabled={isLoading}
-            className={`flex items-center gap-3 bg-emerald-600 hover:bg-emerald-500 text-white px-8 py-4 rounded-2xl font-black transition-all shadow-xl hover:-translate-y-1 active:scale-95 text-sm uppercase ${isLoading ? 'opacity-50' : ''}`}
+            className={`flex items-center gap-3 bg-emerald-600 hover:bg-emerald-500 text-white px-8 py-4 rounded-2xl font-black transition-all shadow-xl hover:-translate-y-1 active:scale-95 text-sm uppercase ${isLoading ? 'opacity-50 cursor-wait' : ''}`}
           >
-            <FileUp size={20} /> {isLoading ? 'Processando...' : 'Enviar PDF'}
+            <FileUp size={20} /> {isLoading ? 'Analisando PDF...' : 'Enviar PDF'}
           </button>
           
           <button 
